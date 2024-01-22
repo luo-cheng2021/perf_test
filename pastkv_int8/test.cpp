@@ -360,10 +360,10 @@ static inline int measure_access(char *addr) {
 const int NN = 1000;
 const int M = 128;
 const long CL = 64;
-size_t access_times[M];
-size_t exec_times = 0;
-static char array[3 * 1024 * 1024];
-int blocks = 0;
+size_t access_times[8][M];
+size_t exec_times[8] = {0};
+static char array[8][3 * 1024 * 1024];
+volatile int blocks = 1;
 
 template <typename T, typename T2>
 static void mha_single_token_kernel(const PlainTensor& query,
@@ -409,7 +409,15 @@ static void mha_single_token_kernel(const PlainTensor& query,
             head_sum.at<float>(b, h, pq, false) = sum_q_head(&query.at<T>(b, h, pq, false), S);
         });
     }
-    // parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+    unsigned int _t0 = 0;
+    unsigned int _t1 = 0;
+    u_int64_t _t00 = 0;
+    u_int64_t _t01 = 0;
+
+    _t00 = __rdtscp(&_t0);
+    _mm_mfence();
+
+    parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
     //     size_t start{0}, end{0};
     //     splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
 
@@ -459,11 +467,10 @@ static void mha_single_token_kernel(const PlainTensor& query,
     //         }
     //     }
     // });
-    {
-        memset(access_times, 0, sizeof(access_times));
-        exec_times = 0;
+    //{
+        memset(access_times[ithr], 0, sizeof(access_times[ithr]));
+        exec_times[ithr] = 0;
 
-        size_t nthr = 1, ithr = 0;
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
 
@@ -487,7 +494,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 auto pp = p_present_key;
                 {
                     // warm up
-                    memset(array, 2, sizeof(array));
+                    memset(array[ithr], 2, sizeof(array[ithr]));
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
                             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
@@ -525,15 +532,22 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 t01 = __rdtscp(&t1);
                 _mm_mfence();
                 int cycles = (int) (t01 - t00);
-                exec_times += cycles;
-                access_times[el] += measure_access((char*)pp + el * CL);
+                exec_times[ithr] += cycles;
+                access_times[ithr][el] += measure_access((char*)pp + el * CL);
             }
         }
+    });
+    for (size_t x = 0; x < 8; x++) {
+        printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
+        // for(int i = 0; i < M; i++) {
+        //     printf("%d %ld\n", i, access_times[x][i]);
+        // }
     }
-    printf("blocks,%d,exec_times,%.2lf,%.2lf\n", blocks, double(exec_times) / NN / M, double(exec_times) / NN / M / blocks);
-    for(int i = 0; i < M; i++) {
-        printf("%d: %ld\n", i, access_times[i]);
-    }
+    _mm_mfence();
+    _t01 = __rdtscp(&_t1);
+    _mm_mfence();
+    size_t cycles = (size_t) (_t01 - _t00);
+    printf("loop %'ld cycles\n", cycles);
     return;
 
     parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
@@ -722,15 +736,18 @@ void test(size_t count) {
   ocperf stat -e mem_load_retired.fb_hit,mem_load_retired.l2_miss,mem_load_retired.l2_hit -- numactl -C0,2,4,6,8,10,12,14 ./test
   ocperf stat -e unc_m_prefetch_rd -- numactl -C0,2,4,6,8,10,12,14 ./test
   ocperf stat -e cycles,OFFCORE_REQUESTS.DATA_RD,OFFCORE_REQUESTS.DEMAND_DATA_RD,OFFCORE_REQUESTS_OUTSTANDING.CYCLES_WITH_DATA_RD,OFFCORE_REQUESTS_OUTSTANDING.CYCLES_WITH_DEMAND_DATA_RD -- numactl -C0,2,4,6,8,10,12,14 ./test
+  gcc test.cpp -O2 -fopenmp -lstdc++ -lm -mavx2 -mfma -g -o test && numactl -C0,2,4,6,8,10,12,14 ./test 1
 */
 int main(int argc, char* argv[]) {
+    setlocale(LC_NUMERIC, "");
     blocks = atoi(argv[1]);
+    _mm_mfence();
     init();
     int n = 1;
     auto start = std::chrono::steady_clock::now();
-    //for (int k = 1; k < 32; k++) 
+    for (int k = 1; k < 64; k++) 
     {
-        //blocks = k;
+        blocks = k;
         test(n);
     }
     auto end = std::chrono::steady_clock::now();
