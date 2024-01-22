@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include <immintrin.h>
+#include <x86intrin.h>
 
 #define HAVE_AVX2
 #define OV_THREAD OV_THREAD_OMP
@@ -339,6 +340,31 @@ static void attn_reduce(T* dst, float* temp, size_t M, size_t S, size_t temp_str
         _mm_prefetch(p + i + advance, sel);         \
 }
 
+static inline int measure_access(char *addr) {
+    unsigned int t0 = 0;
+    unsigned int t1 = 0;
+    u_int64_t t00 = 0;
+    u_int64_t t01 = 0;
+
+    _mm_mfence();
+    t00 = __rdtscp(&t0);
+    _mm_mfence();
+
+    *(volatile char *) addr;
+
+    _mm_mfence();
+    t01 = __rdtscp(&t1);
+    int cycles = (int) (t01 - t00);
+    return cycles;
+}
+const int NN = 1000;
+const int M = 128;
+const long CL = 64;
+size_t access_times[M];
+size_t exec_times = 0;
+static char array[3 * 1024 * 1024];
+int blocks = 0;
+
 template <typename T, typename T2>
 static void mha_single_token_kernel(const PlainTensor& query,
                              const PlainTensor& present_key,
@@ -383,56 +409,132 @@ static void mha_single_token_kernel(const PlainTensor& query,
             head_sum.at<float>(b, h, pq, false) = sum_q_head(&query.at<T>(b, h, pq, false), S);
         });
     }
-    parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+    // parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+    //     size_t start{0}, end{0};
+    //     splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
+
+    //     size_t b, h_group, pk;
+    //     if (start < end) {
+    //         parallel_it_init(start, b, B, h_group, h_group_num, pk, kv_len);
+    //         if (q_len == 1 && h_each_group_len == 1) {
+    //             for (size_t iwork = start; iwork < end; ++iwork) {
+    //                 auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+    //                 auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+    //                 buf_attn_w.at<float>(b, h_group, 0, pk) =
+    //                         dot_product(&query.at<T>(b, h_group, false), &present_key.at<T2>(b_kv, h_group, pk, false),
+    //                             S, p, p + 1, &head_sum.at<float>(b, h_group, false));
+    //                 parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+    //             }
+    //             // auto p = &past_k_scale_zp.at<float>(b, h_group, pk, false);
+    //             // // [b, h, L0+L1, S]
+    //             // auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
+    //             // for (size_t iwork = start; iwork < end; ++iwork) {
+    //             //     //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+    //             //     auto b_kv = b; //beams ? beams.at<int32_t>(b, pk) : b;
+    //             //     //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+    //             //     // _mm_prefetch(p_present_key + 1024, _MM_HINT_T1);
+    //             //     // _mm_prefetch(p_present_key + 1024 + 16, _MM_HINT_T1);
+    //             //     // if (h_group % 4 == 0)
+    //             //     //     prefetch_bytes(512, _MM_HINT_T0, 4096*2, p_present_key);
+    //             //     buf_attn_w.at<float>(b, h_group, 0, pk) =
+    //             //             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
+    //             //                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
+    //             //     parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+    //             //     p += 2;
+    //             //     p_present_key += S;
+    //             // }
+    //         } else {
+    //             for (size_t iwork = start; iwork < end; ++iwork) {
+    //                 auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+    //                 for (size_t pq = 0; pq < q_len; pq++) {
+    //                     auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+    //                     for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
+    //                         buf_attn_w.at<float>(b, h, pq, pk) =
+    //                                 dot_product(&query.at<T>(b, h, pq, false), &present_key.at<T2>(b_kv, h_group, pk, false),
+    //                                     S, p, p + 1, &head_sum.at<float>(b, h, pq, false));
+    //                     }
+    //                 }
+    //                 parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+    //             }
+    //         }
+    //     }
+    // });
+    {
+        memset(access_times, 0, sizeof(access_times));
+        exec_times = 0;
+
+        size_t nthr = 1, ithr = 0;
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
 
         size_t b, h_group, pk;
+        end = start + blocks;
         if (start < end) {
-            parallel_it_init(start, b, B, h_group, h_group_num, pk, kv_len);
-            if (q_len == 1 && h_each_group_len == 1) {
-                for (size_t iwork = start; iwork < end; ++iwork) {
-                    auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-                    auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-                    buf_attn_w.at<float>(b, h_group, 0, pk) =
-                            dot_product(&query.at<T>(b, h_group, false), &present_key.at<T2>(b_kv, h_group, pk, false),
-                                S, p, p + 1, &head_sum.at<float>(b, h_group, false));
-                    parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-                }
-                // auto p = &past_k_scale_zp.at<float>(b, h_group, pk, false);
-                // // [b, h, L0+L1, S]
-                // auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
+            for (int nn = 0; nn < NN; nn++)
+            for (int el = 0; el < M; el++) {
+                parallel_it_init(start, b, B, h_group, h_group_num, pk, kv_len);
                 // for (size_t iwork = start; iwork < end; ++iwork) {
-                //     //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-                //     auto b_kv = b; //beams ? beams.at<int32_t>(b, pk) : b;
-                //     //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-                //     // _mm_prefetch(p_present_key + 1024, _MM_HINT_T1);
-                //     // _mm_prefetch(p_present_key + 1024 + 16, _MM_HINT_T1);
-                //     // if (h_group % 4 == 0)
-                //     //     prefetch_bytes(512, _MM_HINT_T0, 4096*2, p_present_key);
+                //     auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+                //     auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
                 //     buf_attn_w.at<float>(b, h_group, 0, pk) =
-                //             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
+                //             dot_product(&query.at<T>(b, h_group, false), &present_key.at<T2>(b_kv, h_group, pk, false),
                 //                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
                 //     parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-                //     p += 2;
-                //     p_present_key += S;
                 // }
-            } else {
-                for (size_t iwork = start; iwork < end; ++iwork) {
-                    auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-                    for (size_t pq = 0; pq < q_len; pq++) {
-                        auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-                        for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
-                            buf_attn_w.at<float>(b, h, pq, pk) =
-                                    dot_product(&query.at<T>(b, h, pq, false), &present_key.at<T2>(b_kv, h_group, pk, false),
-                                        S, p, p + 1, &head_sum.at<float>(b, h, pq, false));
-                        }
+                auto p = &past_k_scale_zp.at<float>(b, h_group, pk, false);
+                // [b, h, L0+L1, S]
+                auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
+                auto pp = p_present_key;
+                {
+                    // warm up
+                    memset(array, 2, sizeof(array));
+                    buf_attn_w.at<float>(b, h_group, 0, pk) =
+                            dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
+                                S, p, p + 1, &head_sum.at<float>(b, h_group, false));
+                    // flush cache
+                    for(int i = 0; i < M; i++) {
+                        _mm_clflush((char*)pp + i * CL);
                     }
-                    parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                    _mm_mfence();
                 }
+                unsigned int t0 = 0;
+                unsigned int t1 = 0;
+                u_int64_t t00 = 0;
+                u_int64_t t01 = 0;
+
+                t00 = __rdtscp(&t0);
+                _mm_mfence();
+                for (size_t iwork = start; iwork < end; ++iwork) {
+                    //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+                    auto b_kv = b; //beams ? beams.at<int32_t>(b, pk) : b;
+                    //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+                    // _mm_prefetch(p_present_key + 1024, _MM_HINT_T1);
+                    // _mm_prefetch(p_present_key + 1024 + 16, _MM_HINT_T1);
+                    // if (h_group % 4 == 0)
+                    //     prefetch_bytes(512, _MM_HINT_T0, 4096*2, p_present_key);
+                    buf_attn_w.at<float>(b, h_group, 0, pk) =
+                            dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
+                                S, p, p + 1, &head_sum.at<float>(b, h_group, false));
+                    parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                    p += 2;
+                    p_present_key += S;
+                }
+                // volatile int xx = 0;
+                // while (xx < 1111111 * 1000) xx += 1111111;
+                _mm_mfence();
+                t01 = __rdtscp(&t1);
+                _mm_mfence();
+                int cycles = (int) (t01 - t00);
+                exec_times += cycles;
+                access_times[el] += measure_access((char*)pp + el * CL);
             }
         }
-    });
+    }
+    printf("blocks,%d,exec_times,%.2lf,%.2lf\n", blocks, double(exec_times) / NN / M, double(exec_times) / NN / M / blocks);
+    for(int i = 0; i < M; i++) {
+        printf("%d: %ld\n", i, access_times[i]);
+    }
+    return;
 
     parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
         // apply attention mask & sofmax
@@ -538,7 +640,7 @@ void mha_single_token(const PlainTensor& query,
 }
 
 size_t B = 4, H = 32, L0 = 1023, L1 = 1, S = 128;
-const size_t N = 32;
+const size_t N = 1;
 
 PlainTensor query;
 PlainTensor present_key[N];
@@ -622,10 +724,15 @@ void test(size_t count) {
   ocperf stat -e cycles,OFFCORE_REQUESTS.DATA_RD,OFFCORE_REQUESTS.DEMAND_DATA_RD,OFFCORE_REQUESTS_OUTSTANDING.CYCLES_WITH_DATA_RD,OFFCORE_REQUESTS_OUTSTANDING.CYCLES_WITH_DEMAND_DATA_RD -- numactl -C0,2,4,6,8,10,12,14 ./test
 */
 int main(int argc, char* argv[]) {
+    blocks = atoi(argv[1]);
     init();
-    int n = 10;
+    int n = 1;
     auto start = std::chrono::steady_clock::now();
-    test(n);
+    //for (int k = 1; k < 32; k++) 
+    {
+        //blocks = k;
+        test(n);
+    }
     auto end = std::chrono::steady_clock::now();
     float c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     printf("cost %.3f ms\n", c / n);
