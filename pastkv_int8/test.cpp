@@ -430,7 +430,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
     _t00 = __rdtscp(&_t0);
 
     parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
-
+        
 
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
@@ -457,38 +457,22 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
                     auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-                    if (g_hit_cache)
-                        p_present_key = &present_key.at<T2>(b_kv / 8, h_group / 64, pk / 2048, false);
-                    else
-                        p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
+                    // if (g_hit_cache)
+                    //     p_present_key = &present_key.at<T2>(b_kv / 8, h_group / 64, pk / 2048, false);
+                    // else
+                    //     p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
                             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
                     parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                    if (!g_hit_cache) {
+                        p_present_key += S;
+                        //p += 2;
+                    }
                 }
             }
         }
     });
-    // size_t min_exec_times = 10000000000;
-    // size_t min_idx = 0;
-    // for (size_t x = 0; x < nthr; x++) {
-    //     if (min_exec_times > g_exec[x].cycles) {
-    //         min_exec_times = g_exec[x].cycles;
-    //         min_idx = x;
-    //     }
-    // }
-    // min_exec_times = g_exec[0].cycles;
-    // min_idx = 0;
-    // printf("blocks %d exec_times %.2lf ns: %.2lf\n", blocks,
-    //     double(min_exec_times) / NN / M,
-    //     double(g_exec[min_idx].ns) / NN / M);
-    // // for (size_t x = 0; x < nthr; x++) {
-    // //     printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
-    // //     // for(int i = 0; i < M; i++) {
-    // //     //     printf("%d %ld\n", i, access_times[x][i]);
-    // //     // }
-    // // }
-    // _mm_mfence();
     _t01 = __rdtscp(&_t1);
     size_t cycles = (size_t) (_t01 - _t00);
     if (g_is_test) {
@@ -497,7 +481,6 @@ static void mha_single_token_kernel(const PlainTensor& query,
         auto end_ns = std::chrono::steady_clock::now();
         g_exec.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
     }
-    //printf("loop %'ld cycles\n", cycles);
     if (g_hit_cache)
         return;
 
@@ -714,7 +697,7 @@ int main(int argc, char* argv[]) {
     float c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     size_t call_dot_product_cout_per_thread = B * H * (L0 + L1) * N / g_nthr;
     printf("[no miss] cost %'.3f ms\n", c / count);
-    printf("[no miss] dot product(all) cost %'ld ns, cost %'ld cycles, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
+    printf("[no miss] dot product(all) cost %'ld ns, cost %'ld cycles, count %'ld, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, g_exec.count, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
 
     g_is_test = false;
     init(true);
@@ -729,7 +712,7 @@ int main(int argc, char* argv[]) {
     end = std::chrono::steady_clock::now();
     c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     printf("[miss] cost %'.3f ms\n", c / count);
-    printf("[miss] dot product(all) cost %'ld ns, cost %'ld cycles, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
+    printf("[miss] dot product(all) cost %'ld ns, cost %'ld cycles, count %'ld, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, g_exec.count, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
 
     return 0;
 }
