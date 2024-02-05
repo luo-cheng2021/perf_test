@@ -362,8 +362,9 @@ const int M = 128;
 const long CL = 64;
 size_t access_times[8][M];
 size_t exec_times[8] = {0};
+size_t exec_times_ns[8] = {0};
+
 static char array[8][3 * 1024 * 1024];
-volatile int blocks = 1;
 
 template <typename T, typename T2>
 static void mha_single_token_kernel(const PlainTensor& query,
@@ -380,7 +381,8 @@ static void mha_single_token_kernel(const PlainTensor& query,
                              float d_scale,
                              const PlainTensor& past_k_scale_zp,
                              const PlainTensor& past_v_scale_zp,
-                             PlainTensor& head_sum) {
+                             PlainTensor& head_sum,
+                             int blocks) {
     PlainTensor causal_mask;
     bool select_nfltmax_at_0 = false;
     auto B = query.size(0);
@@ -470,6 +472,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
     //{
         memset(access_times[ithr], 0, sizeof(access_times[ithr]));
         exec_times[ithr] = 0;
+        exec_times_ns[ithr] = 0;
 
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
@@ -510,6 +513,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 u_int64_t t01 = 0;
 
                 t00 = __rdtscp(&t0);
+                auto start_ns = std::chrono::steady_clock::now();
                 _mm_mfence();
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
@@ -529,25 +533,39 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 // volatile int xx = 0;
                 // while (xx < 1111111 * 1000) xx += 1111111;
                 _mm_mfence();
+                auto end_ns = std::chrono::steady_clock::now();
                 t01 = __rdtscp(&t1);
                 _mm_mfence();
+                exec_times_ns[ithr] += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
                 int cycles = (int) (t01 - t00);
                 exec_times[ithr] += cycles;
                 access_times[ithr][el] += measure_access((char*)pp + el * CL);
             }
         }
     });
-    for (size_t x = 0; x < 8; x++) {
-        printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
-        // for(int i = 0; i < M; i++) {
-        //     printf("%d %ld\n", i, access_times[x][i]);
-        // }
+    size_t min_exec_times = 10000000000;
+    size_t min_idx = 0;
+    for (size_t x = 0; x < nthr; x++) {
+        if (min_exec_times > exec_times[x]) {
+            min_exec_times = exec_times[x];
+            min_idx = x;
+        }
     }
+    //min_exec_times = exec_times[0];
+    printf("blocks %d exec_times %.2lf ns: %.2lf\n", blocks,
+        double(min_exec_times) / NN / M,
+        double(exec_times_ns[min_idx]) / NN / M);
+    // for (size_t x = 0; x < nthr; x++) {
+    //     printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
+    //     // for(int i = 0; i < M; i++) {
+    //     //     printf("%d %ld\n", i, access_times[x][i]);
+    //     // }
+    // }
     _mm_mfence();
     _t01 = __rdtscp(&_t1);
     _mm_mfence();
     size_t cycles = (size_t) (_t01 - _t00);
-    printf("loop %'ld cycles\n", cycles);
+    //printf("loop %'ld cycles\n", cycles);
     return;
 
     parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
@@ -635,7 +653,8 @@ void mha_single_token(const PlainTensor& query,
                       float d_scale,
                       const PlainTensor& past_k_scale_zp,
                       const PlainTensor& past_v_scale_zp,
-                      PlainTensor& head_sum) {
+                      PlainTensor& head_sum,
+                      int blocks) {
         mha_single_token_kernel<float, uint8_t>(query,
                                                 present_key,
                                                 present_value,
@@ -650,7 +669,8 @@ void mha_single_token(const PlainTensor& query,
                                                 d_scale,
                                                 past_k_scale_zp,
                                                 past_v_scale_zp,
-                                                head_sum);
+                                                head_sum,
+                                                blocks);
 }
 
 size_t B = 4, H = 32, L0 = 1023, L1 = 1, S = 128;
@@ -704,11 +724,12 @@ void init() {
             d_scale,
             past_k_scale_zp[n],
             past_v_scale_zp[n],
-            head_sum);
+            head_sum,
+            1);
     }
 }
 
-void test(size_t count) {
+void test(size_t count, int blocks) {
     for (size_t i = 0; i < count; i++){
         for (size_t n = 0; n < N; n++) {
             mha_single_token(query,
@@ -725,7 +746,8 @@ void test(size_t count) {
                 d_scale,
                 past_k_scale_zp[n],
                 past_v_scale_zp[n],
-                head_sum);
+                head_sum,
+                blocks);
         }
     }
 }
@@ -740,15 +762,13 @@ void test(size_t count) {
 */
 int main(int argc, char* argv[]) {
     setlocale(LC_NUMERIC, "");
-    blocks = atoi(argv[1]);
     _mm_mfence();
     init();
     int n = 1;
     auto start = std::chrono::steady_clock::now();
     for (int k = 1; k < 64; k++) 
     {
-        blocks = k;
-        test(n);
+        test(n, k);
     }
     auto end = std::chrono::steady_clock::now();
     float c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
