@@ -454,6 +454,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 // [b, h, L0+L1, S]
                 auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
                 auto pp = p_present_key;
+                auto p_q = &query.at<T>(b, h_group, false);
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
                     auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
@@ -462,12 +463,23 @@ static void mha_single_token_kernel(const PlainTensor& query,
                     // else
                     //     p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
-                            dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
+                            dot_product(p_q, p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
-                    parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
+                    //parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
                     if (!g_hit_cache) {
                         p_present_key += S;
                         //p += 2;
+                    }
+                    if (++pk == kv_len) {
+                        pk = 0;
+                        if (!g_hit_cache)
+                            p_present_key += present_key.m_strides[1] - S * kv_len;
+                        p_q += S;
+                        if (++h_group == h_group_num) {
+                            h_group = 0;
+                            if (++b == B)
+                                break;
+                        }
                     }
                 }
             }
