@@ -357,14 +357,24 @@ static inline int measure_access(char *addr) {
     int cycles = (int) (t01 - t00);
     return cycles;
 }
-const int NN = 1000;
-const int M = 128;
+// const int NN = 1000;
+// const int M = 256;
+const int NN = 1;
+const int M = 1;
 const long CL = 64;
 size_t access_times[8][M];
-size_t exec_times[8] = {0};
-size_t exec_times_ns[8] = {0};
-
+struct exec {
+    size_t cycles;
+    size_t ns;
+    size_t count;
+    void reset() {
+        memset(this, 0, sizeof(*this));
+    }
+} g_exec;
+int g_nthr;
+bool g_is_test = false;
 static char array[8][3 * 1024 * 1024];
+bool g_hit_cache = false;
 
 template <typename T, typename T2>
 static void mha_single_token_kernel(const PlainTensor& query,
@@ -416,69 +426,18 @@ static void mha_single_token_kernel(const PlainTensor& query,
     u_int64_t _t00 = 0;
     u_int64_t _t01 = 0;
 
+    auto start_ns = std::chrono::steady_clock::now();
     _t00 = __rdtscp(&_t0);
-    _mm_mfence();
 
     parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
-    //     size_t start{0}, end{0};
-    //     splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
 
-    //     size_t b, h_group, pk;
-    //     if (start < end) {
-    //         parallel_it_init(start, b, B, h_group, h_group_num, pk, kv_len);
-    //         if (q_len == 1 && h_each_group_len == 1) {
-    //             for (size_t iwork = start; iwork < end; ++iwork) {
-    //                 auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-    //                 auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-    //                 buf_attn_w.at<float>(b, h_group, 0, pk) =
-    //                         dot_product(&query.at<T>(b, h_group, false), &present_key.at<T2>(b_kv, h_group, pk, false),
-    //                             S, p, p + 1, &head_sum.at<float>(b, h_group, false));
-    //                 parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-    //             }
-    //             // auto p = &past_k_scale_zp.at<float>(b, h_group, pk, false);
-    //             // // [b, h, L0+L1, S]
-    //             // auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
-    //             // for (size_t iwork = start; iwork < end; ++iwork) {
-    //             //     //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-    //             //     auto b_kv = b; //beams ? beams.at<int32_t>(b, pk) : b;
-    //             //     //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-    //             //     // _mm_prefetch(p_present_key + 1024, _MM_HINT_T1);
-    //             //     // _mm_prefetch(p_present_key + 1024 + 16, _MM_HINT_T1);
-    //             //     // if (h_group % 4 == 0)
-    //             //     //     prefetch_bytes(512, _MM_HINT_T0, 4096*2, p_present_key);
-    //             //     buf_attn_w.at<float>(b, h_group, 0, pk) =
-    //             //             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
-    //             //                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
-    //             //     parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-    //             //     p += 2;
-    //             //     p_present_key += S;
-    //             // }
-    //         } else {
-    //             for (size_t iwork = start; iwork < end; ++iwork) {
-    //                 auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-    //                 for (size_t pq = 0; pq < q_len; pq++) {
-    //                     auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-    //                     for (size_t h = h_group * h_each_group_len; h < (h_group + 1) * h_each_group_len; h++) {
-    //                         buf_attn_w.at<float>(b, h, pq, pk) =
-    //                                 dot_product(&query.at<T>(b, h, pq, false), &present_key.at<T2>(b_kv, h_group, pk, false),
-    //                                     S, p, p + 1, &head_sum.at<float>(b, h, pq, false));
-    //                     }
-    //                 }
-    //                 parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-    //             }
-    //         }
-    //     }
-    // });
-    //{
-        memset(access_times[ithr], 0, sizeof(access_times[ithr]));
-        exec_times[ithr] = 0;
-        exec_times_ns[ithr] = 0;
 
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
 
         size_t b, h_group, pk;
-        end = start + blocks;
+        if (blocks > 0)
+            end = start + blocks;
         if (start < end) {
             for (int nn = 0; nn < NN; nn++)
             for (int el = 0; el < M; el++) {
@@ -495,78 +454,52 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 // [b, h, L0+L1, S]
                 auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
                 auto pp = p_present_key;
-                {
-                    // warm up
-                    memset(array[ithr], 2, sizeof(array[ithr]));
-                    buf_attn_w.at<float>(b, h_group, 0, pk) =
-                            dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
-                                S, p, p + 1, &head_sum.at<float>(b, h_group, false));
-                    // flush cache
-                    for(int i = 0; i < M; i++) {
-                        _mm_clflush((char*)pp + i * CL);
-                    }
-                    _mm_mfence();
-                }
-                unsigned int t0 = 0;
-                unsigned int t1 = 0;
-                u_int64_t t00 = 0;
-                u_int64_t t01 = 0;
-
-                t00 = __rdtscp(&t0);
-                auto start_ns = std::chrono::steady_clock::now();
-                _mm_mfence();
                 for (size_t iwork = start; iwork < end; ++iwork) {
-                    //auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
-                    auto b_kv = b; //beams ? beams.at<int32_t>(b, pk) : b;
-                    //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
-                    // _mm_prefetch(p_present_key + 1024, _MM_HINT_T1);
-                    // _mm_prefetch(p_present_key + 1024 + 16, _MM_HINT_T1);
-                    // if (h_group % 4 == 0)
-                    //     prefetch_bytes(512, _MM_HINT_T0, 4096*2, p_present_key);
+                    auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
+                    auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+                    if (g_hit_cache)
+                        p_present_key = &present_key.at<T2>(b_kv / 8, h_group / 64, pk / 2048, false);
+                    else
+                        p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
                             dot_product(&query.at<T>(b, h_group, false), p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
                     parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
-                    p += 2;
-                    p_present_key += S;
                 }
-                // volatile int xx = 0;
-                // while (xx < 1111111 * 1000) xx += 1111111;
-                _mm_mfence();
-                auto end_ns = std::chrono::steady_clock::now();
-                t01 = __rdtscp(&t1);
-                _mm_mfence();
-                exec_times_ns[ithr] += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
-                int cycles = (int) (t01 - t00);
-                exec_times[ithr] += cycles;
-                access_times[ithr][el] += measure_access((char*)pp + el * CL);
             }
         }
     });
-    size_t min_exec_times = 10000000000;
-    size_t min_idx = 0;
-    for (size_t x = 0; x < nthr; x++) {
-        if (min_exec_times > exec_times[x]) {
-            min_exec_times = exec_times[x];
-            min_idx = x;
-        }
-    }
-    //min_exec_times = exec_times[0];
-    printf("blocks %d exec_times %.2lf ns: %.2lf\n", blocks,
-        double(min_exec_times) / NN / M,
-        double(exec_times_ns[min_idx]) / NN / M);
+    // size_t min_exec_times = 10000000000;
+    // size_t min_idx = 0;
     // for (size_t x = 0; x < nthr; x++) {
-    //     printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
-    //     // for(int i = 0; i < M; i++) {
-    //     //     printf("%d %ld\n", i, access_times[x][i]);
-    //     // }
+    //     if (min_exec_times > g_exec[x].cycles) {
+    //         min_exec_times = g_exec[x].cycles;
+    //         min_idx = x;
+    //     }
     // }
-    _mm_mfence();
+    // min_exec_times = g_exec[0].cycles;
+    // min_idx = 0;
+    // printf("blocks %d exec_times %.2lf ns: %.2lf\n", blocks,
+    //     double(min_exec_times) / NN / M,
+    //     double(g_exec[min_idx].ns) / NN / M);
+    // // for (size_t x = 0; x < nthr; x++) {
+    // //     printf("tid %ld blocks %d exec_times %.2lf %.2lf\n", x, blocks, double(exec_times[x]) / NN / M, double(exec_times[x]) / NN / M / blocks);
+    // //     // for(int i = 0; i < M; i++) {
+    // //     //     printf("%d %ld\n", i, access_times[x][i]);
+    // //     // }
+    // // }
+    // _mm_mfence();
     _t01 = __rdtscp(&_t1);
-    _mm_mfence();
     size_t cycles = (size_t) (_t01 - _t00);
+    if (g_is_test) {
+        g_exec.count++;
+        g_exec.cycles += cycles;
+        auto end_ns = std::chrono::steady_clock::now();
+        g_exec.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
+    }
     //printf("loop %'ld cycles\n", cycles);
-    return;
+    if (g_hit_cache)
+        return;
 
     parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
         // apply attention mask & sofmax
@@ -674,7 +607,7 @@ void mha_single_token(const PlainTensor& query,
 }
 
 size_t B = 4, H = 32, L0 = 1023, L1 = 1, S = 128;
-const size_t N = 1;
+const size_t N = 32;
 
 PlainTensor query;
 PlainTensor present_key[N];
@@ -692,7 +625,7 @@ PlainTensor past_k_scale_zp[N];
 PlainTensor past_v_scale_zp[N];
 PlainTensor head_sum;
 
-void init() {
+void init(bool touch = false) {
     beams.resize<int32_t>({B, L0 + L1});
     for (size_t l = 0; l < L0 + L1; l++)
         for (size_t b = 0; b < B; b++) {
@@ -700,16 +633,18 @@ void init() {
         }
     for (size_t n = 0; n < N; n++) {
         query.resize<float>({B, H, L1, S});
-        query = 1.0f;
         present_key[n].resize<uint8_t>({B, H, L0 + L1, S});
-        present_key[n] = uint8_t{1};
         present_value[n].resize<uint8_t>({B, H, L0 + L1, S});
-        present_value[n] = uint8_t{1};
         output_emb[n].resize<float>({B, H, L1, S});
         past_k_scale_zp[n].resize<float>({B, H, L0 + L1, 2});
-        past_k_scale_zp[n] = 1.0f;
         past_v_scale_zp[n].resize<float>({B, H, L0 + L1, 2});
-        past_v_scale_zp[n] = 1.0f;
+        if (touch) {
+            query = 1.0f;
+            present_key[n] = uint8_t{1};
+            present_value[n] = uint8_t{1};
+            past_k_scale_zp[n] = 1.0f;
+            past_v_scale_zp[n] = 1.0f;
+        }
         mha_single_token(query,
             present_key[n],
             present_value[n],
@@ -761,17 +696,40 @@ void test(size_t count, int blocks) {
   gcc test.cpp -O2 -fopenmp -lstdc++ -lm -mavx2 -mfma -g -o test && numactl -C0,2,4,6,8,10,12,14 ./test 1
 */
 int main(int argc, char* argv[]) {
+    g_nthr = parallel_get_max_threads();
+
     setlocale(LC_NUMERIC, "");
-    _mm_mfence();
+
     init();
-    int n = 1;
+    g_exec.reset();
+    g_hit_cache = true;
+    g_is_test = true;
+    int count = 1000;
     auto start = std::chrono::steady_clock::now();
-    for (int k = 1; k < 64; k++) 
+    //for (int k = 1; k < 128; k++)
     {
-        test(n, k);
+        test(count, -1);
     }
     auto end = std::chrono::steady_clock::now();
     float c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    printf("cost %.3f ms\n", c / n);
+    size_t call_dot_product_cout_per_thread = B * H * (L0 + L1) * N / g_nthr;
+    printf("[no miss] cost %'.3f ms\n", c / count);
+    printf("[no miss] dot product(all) cost %'ld ns, cost %'ld cycles, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
+
+    g_is_test = false;
+    init(true);
+    g_exec.reset();
+    g_hit_cache = false;
+    g_is_test = true;
+    start = std::chrono::steady_clock::now();
+    //for (int k = 1; k < 128; k++)
+    {
+        test(count, -1);
+    }
+    end = std::chrono::steady_clock::now();
+    c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    printf("[miss] cost %'.3f ms\n", c / count);
+    printf("[miss] dot product(all) cost %'ld ns, cost %'ld cycles, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
+
     return 0;
 }
