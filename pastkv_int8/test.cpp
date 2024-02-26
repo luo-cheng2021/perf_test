@@ -499,13 +499,13 @@ static void mha_single_token_kernel(const PlainTensor& query,
                     //parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
                     if (!g_hit_cache) {
                         p_present_key += S;
-                        //p += 2;
+                        p += 2;
                     }
                     if (++pk == kv_len) {
                         pk = 0;
                         if (!g_hit_cache) {
                             p_present_key += present_key.m_strides[1] - S * kv_len;
-                            //p += past_k_scale_zp.m_strides[1] - 2 * kv_len;
+                            p += past_k_scale_zp.m_strides[1] - 2 * kv_len;
                         }
                         p_q += S;
                         if (++h_group == h_group_num) {
