@@ -421,6 +421,16 @@ static void mha_single_token_kernel(const PlainTensor& query,
             head_sum.at<float>(b, h, pq, false) = sum_q_head(&query.at<T>(b, h, pq, false), S);
         });
     }
+    // unsigned int _t0 = 0;
+    // unsigned int _t1 = 0;
+    // u_int64_t _t00 = 0;
+    // u_int64_t _t01 = 0;
+
+    // auto start_ns = std::chrono::steady_clock::now();
+    // _t00 = __rdtscp(&_t0);
+
+    parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
+        
     unsigned int _t0 = 0;
     unsigned int _t1 = 0;
     u_int64_t _t00 = 0;
@@ -428,9 +438,6 @@ static void mha_single_token_kernel(const PlainTensor& query,
 
     auto start_ns = std::chrono::steady_clock::now();
     _t00 = __rdtscp(&_t0);
-
-    parallel_nt_static(nthr, [&](const size_t ithr, const size_t nthr) {
-        
 
         size_t start{0}, end{0};
         splitter(B * h_group_num * kv_len, nthr, ithr, start, end);
@@ -455,6 +462,28 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
                 auto pp = p_present_key;
                 auto p_q = &query.at<T>(b, h_group, false);
+#if 0
+                auto p_k = pp;
+                for (size_t iwork = start; iwork < end; ++iwork) {
+                    //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
+                    //auto p_k = &present_key.at<T2>(b_kv, h_group, pk, false);
+                    // _mm_prefetch(p_k + 4096*1, _MM_HINT_T0);
+                    // _mm_prefetch(p_k + 4096*1 + 64, _MM_HINT_T0);
+                    for (size_t i = 0; i < S; i += 64) {
+                        *(volatile int*)(p_k + i);
+                    }
+                    p_k += S;
+                    if (++pk == kv_len) {
+                        pk = 0;
+                        p_k += present_key.m_strides[1] - S * kv_len;
+                        if (++h_group == h_group_num) {
+                            h_group = 0;
+                            if (++b == B)
+                                break;
+                        }
+                    }
+                }
+#else
                 for (size_t iwork = start; iwork < end; ++iwork) {
                     auto b_kv = beams ? beams.at<int32_t>(b, pk) : b;
                     //auto p = &past_k_scale_zp.at<float>(b_kv, h_group, pk, false);
@@ -462,19 +491,21 @@ static void mha_single_token_kernel(const PlainTensor& query,
                     //     p_present_key = &present_key.at<T2>(b_kv / 8, h_group / 64, pk / 2048, false);
                     // else
                     //     p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
+                    _mm_prefetch(p_present_key + 4096*1, _MM_HINT_T0);
+                    _mm_prefetch(p_present_key + 4096*1 + 64, _MM_HINT_T0);
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
                             dot_product(p_q, p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
                     //parallel_it_step(b, B, h_group, h_group_num, pk, kv_len);
                     if (!g_hit_cache) {
                         p_present_key += S;
-                        p += 2;
+                        //p += 2;
                     }
                     if (++pk == kv_len) {
                         pk = 0;
                         if (!g_hit_cache) {
                             p_present_key += present_key.m_strides[1] - S * kv_len;
-                            p += past_k_scale_zp.m_strides[1] - 2 * kv_len;
+                            //p += past_k_scale_zp.m_strides[1] - 2 * kv_len;
                         }
                         p_q += S;
                         if (++h_group == h_group_num) {
@@ -484,17 +515,26 @@ static void mha_single_token_kernel(const PlainTensor& query,
                         }
                     }
                 }
+#endif
             }
         }
+        _t01 = __rdtscp(&_t1);
+        size_t cycles = (size_t) (_t01 - _t00);
+        if (g_is_test && ithr == 0) {
+            g_exec.count++;
+            g_exec.cycles += cycles;
+            auto end_ns = std::chrono::steady_clock::now();
+            g_exec.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
+        }
     });
-    _t01 = __rdtscp(&_t1);
-    size_t cycles = (size_t) (_t01 - _t00);
-    if (g_is_test) {
-        g_exec.count++;
-        g_exec.cycles += cycles;
-        auto end_ns = std::chrono::steady_clock::now();
-        g_exec.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
-    }
+    // _t01 = __rdtscp(&_t1);
+    // size_t cycles = (size_t) (_t01 - _t00);
+    // if (g_is_test) {
+    //     g_exec.count++;
+    //     g_exec.cycles += cycles;
+    //     auto end_ns = std::chrono::steady_clock::now();
+    //     g_exec.ns += std::chrono::duration_cast<std::chrono::nanoseconds>(end_ns - start_ns).count();
+    // }
     if (g_hit_cache)
         return;
 
@@ -603,7 +643,7 @@ void mha_single_token(const PlainTensor& query,
                                                 blocks);
 }
 
-size_t B = 4, H = 32, L0 = 1023, L1 = 1, S = 128;
+size_t B = 4, H = 32, L0 = 10250 - 1, L1 = 1, S = 128;
 const size_t N = 32;
 
 PlainTensor query;
@@ -630,11 +670,15 @@ void init(bool touch = false) {
         }
     for (size_t n = 0; n < N; n++) {
         query.resize<float>({B, H, L1, S});
-        present_key[n].resize<uint8_t>({B, H, L0 + L1, S});
-        present_value[n].resize<uint8_t>({B, H, L0 + L1, S});
+        present_key[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
+        present_value[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
         output_emb[n].resize<float>({B, H, L1, S});
-        past_k_scale_zp[n].resize<float>({B, H, L0 + L1, 2});
-        past_v_scale_zp[n].resize<float>({B, H, L0 + L1, 2});
+        past_k_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
+        past_v_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
+        present_key[n].m_dims[2] = L0 + L1;
+        present_value[n].m_dims[2] = L0 + L1;
+        past_k_scale_zp[n].m_dims[2] = L0 + L1;
+        past_v_scale_zp[n].m_dims[2] = L0 + L1;
         if (touch) {
             query = 1.0f;
             present_key[n] = uint8_t{1};
@@ -727,6 +771,10 @@ int main(int argc, char* argv[]) {
     c = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     printf("[miss] cost %'.3f ms\n", c / count);
     printf("[miss] dot product(all) cost %'ld ns, cost %'ld cycles, count %'ld, dot_product(kernel) uses %.2lf cycles\n", g_exec.ns, g_exec.cycles, g_exec.count, double(g_exec.cycles) / call_dot_product_cout_per_thread / count);
+    size_t size_pastk = count * B * H * (L0 + L1) * S * N;
+    size_t size_zp = count * B * H * (L0 + L1) * 2 * sizeof(float) * N;
+    printf("bw(pastk) = %.3lf GB/s\n", (double)size_pastk / ((double)g_exec.ns));
+    printf("bw(pastk+zp) = %.3lf GB/s\n", (double)(size_pastk + size_zp) / ((double)g_exec.ns));
 
     return 0;
 }
