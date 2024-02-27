@@ -463,6 +463,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
                 auto p_present_key = &present_key.at<T2>(b, h_group, pk, false);
                 auto pp = p_present_key;
                 auto p_q = &query.at<T>(b, h_group, false);
+                auto p_next = &present_key.at<T2>(b, h_group + 1, false);
 #if 0
                 auto p_k = pp;
                 for (size_t iwork = start; iwork < end; ++iwork) {
@@ -492,12 +493,19 @@ static void mha_single_token_kernel(const PlainTensor& query,
                     //     p_present_key = &present_key.at<T2>(b_kv / 8, h_group / 64, pk / 2048, false);
                     // else
                     //     p_present_key = &present_key.at<T2>(b_kv, h_group, pk, false);
-                    _mm_prefetch(p_present_key + 4096*1, _MM_HINT_T0);
-                    _mm_prefetch(p_present_key + 4096*1 + 64, _MM_HINT_T0);
                     buf_attn_w.at<float>(b, h_group, 0, pk) =
                             dot_product(p_q, p_present_key, //&present_key.at<T2>(b_kv, h_group, pk, false),
                                 S, p, p + 1, &head_sum.at<float>(b, h_group, false));
                     //parallel_it_step(b, B, h_group, h_group_num, pk, cur_kv_len);
+                    if ((cur_kv_len - pk) * S >= 4096) {
+                        _mm_prefetch(p_present_key + 4096*1, _MM_HINT_T0);
+                        _mm_prefetch(p_present_key + 4096*1 + 64, _MM_HINT_T0);
+                    } else {
+                        _mm_prefetch(p_next, _MM_HINT_T0);
+                        _mm_prefetch(p_next + 64, _MM_HINT_T0);
+                        p_next += S;
+                    }
+
                     if (!g_hit_cache) {
                         p_present_key += S;
                         p += 2;
@@ -514,6 +522,7 @@ static void mha_single_token_kernel(const PlainTensor& query,
                             if (++b == B)
                                 break;
                         }
+                        p_next = &present_key.at<T2>(b/*beams.at<int32_t>(b, pk)*/, h_group + 1, false);
                     }
                 }
 #endif
@@ -671,11 +680,11 @@ void init(bool touch = false) {
         }
     for (size_t n = 0; n < N; n++) {
         query.resize<float>({B, H, L1, S});
-        present_key[n].resize<uint8_t>({B, H, (L0 + L1) * 1, S});
-        present_value[n].resize<uint8_t>({B, H, (L0 + L1) * 1, S});
+        present_key[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
+        present_value[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
         output_emb[n].resize<float>({B, H, L1, S});
-        past_k_scale_zp[n].resize<float>({B, H, (L0 + L1) * 1, 2});
-        past_v_scale_zp[n].resize<float>({B, H, (L0 + L1) * 1, 2});
+        past_k_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
+        past_v_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
         present_key[n].m_dims[2] = L0 + L1;
         present_value[n].m_dims[2] = L0 + L1;
         past_k_scale_zp[n].m_dims[2] = L0 + L1;
