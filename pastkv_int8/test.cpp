@@ -644,7 +644,7 @@ void mha_single_token(const PlainTensor& query,
                                                 blocks);
 }
 
-size_t B = 4, H = 32, L0 = 10250 - 1, L1 = 1, S = 128;
+size_t B = 4, H = 32, L0 = 1025 - 1, L1 = 1, S = 128;
 const size_t N = 32;
 
 PlainTensor query;
@@ -671,11 +671,11 @@ void init(bool touch = false) {
         }
     for (size_t n = 0; n < N; n++) {
         query.resize<float>({B, H, L1, S});
-        present_key[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
-        present_value[n].resize<uint8_t>({B, H, (L0 + L1) * 2, S});
+        present_key[n].resize<uint8_t>({B, H, (L0 + L1) * 1, S});
+        present_value[n].resize<uint8_t>({B, H, (L0 + L1) * 1, S});
         output_emb[n].resize<float>({B, H, L1, S});
-        past_k_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
-        past_v_scale_zp[n].resize<float>({B, H, (L0 + L1) * 2, 2});
+        past_k_scale_zp[n].resize<float>({B, H, (L0 + L1) * 1, 2});
+        past_v_scale_zp[n].resize<float>({B, H, (L0 + L1) * 1, 2});
         present_key[n].m_dims[2] = L0 + L1;
         present_value[n].m_dims[2] = L0 + L1;
         past_k_scale_zp[n].m_dims[2] = L0 + L1;
